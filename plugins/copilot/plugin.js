@@ -1,6 +1,12 @@
 (function () {
   const KEYCHAIN_SERVICE = "OpenUsage-copilot";
   const GH_KEYCHAIN_SERVICE = "gh:github.com";
+  // gh writes the token here instead of the keyring when no keyring is available
+  // (common on Linux servers/WSL): ~/.config/gh on macOS/Linux, %APPDATA% on Windows.
+  const GH_HOSTS_FILES = [
+    "~/.config/gh/hosts.yml",
+    "~/AppData/Roaming/GitHub CLI/hosts.yml",
+  ];
   const USAGE_URL = "https://api.github.com/copilot_internal/user";
 
   function readJson(ctx, path) {
@@ -81,6 +87,38 @@
     return null;
   }
 
+  function parseGhHostsToken(text) {
+    if (typeof text !== "string") return null;
+    const lines = text.split(/\r?\n/);
+    let inGithub = false;
+    for (const line of lines) {
+      if (/^\S/.test(line)) {
+        inGithub = line.trim() === "github.com:";
+        continue;
+      }
+      if (!inGithub) continue;
+      const match = line.match(/^\s+oauth_token:\s*["']?([^"'\s]+)["']?\s*$/);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
+  function loadTokenFromGhHostsFile(ctx) {
+    for (const path of GH_HOSTS_FILES) {
+      try {
+        if (!ctx.host.fs.exists(path)) continue;
+        const token = parseGhHostsToken(ctx.host.fs.readText(path));
+        if (token) {
+          ctx.host.log.info("token loaded from gh CLI hosts file");
+          return { token: token, source: "gh-cli" };
+        }
+      } catch (e) {
+        ctx.host.log.info("gh CLI hosts file read failed: " + String(e));
+      }
+    }
+    return null;
+  }
+
   function loadTokenFromStateFile(ctx) {
     const data = readJson(ctx, ctx.app.pluginDataDir + "/auth.json");
     if (data && data.token) {
@@ -94,6 +132,7 @@
     return (
       loadTokenFromKeychain(ctx) ||
       loadTokenFromGhCli(ctx) ||
+      loadTokenFromGhHostsFile(ctx) ||
       loadTokenFromStateFile(ctx)
     );
   }
@@ -165,7 +204,7 @@
       if (source === "keychain") {
         ctx.host.log.info("cached token invalid, trying fallback sources");
         clearCachedToken(ctx);
-        const fallback = loadTokenFromGhCli(ctx);
+        const fallback = loadTokenFromGhCli(ctx) || loadTokenFromGhHostsFile(ctx);
         if (fallback) {
           try {
             resp = fetchUsage(ctx, fallback.token);

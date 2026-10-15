@@ -55,9 +55,27 @@
     ],
     "resources": [
       "resources/bundled_plugins/**/*",
-      "icons/tray-icon.png"
+      "icons/tray-icon.png",
+      "icons/32x32.png"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "linux": {
+      "deb": {
+        "depends": [
+          "libayatana-appindicator3-1"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "libayatana-appindicator-gtk3"
+        ]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   },
   "plugins": {
     "updater": {

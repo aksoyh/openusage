@@ -22,7 +22,6 @@ tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-pn
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 time = { version = "0.3.47", features = ["formatting"] }
 dirs = "6"
 log = "0.4"
@@ -45,10 +44,18 @@ aes-gcm = "0.10.3"
 sha2 = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSScreen", "NSGraphics"] }
 objc2-web-kit = { version = "0.3", features = ["WKPreferences", "WKWebView", "WKWebViewConfiguration"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Linux/Windows replacements for the macOS-only CLI tools used by the plugin host
+# (`security`, `sqlite3`, `ps`, `lsof`).
+keyring = { version = "3", features = ["windows-native", "sync-secret-service", "crypto-rust"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 serial_test = "3.5.0"

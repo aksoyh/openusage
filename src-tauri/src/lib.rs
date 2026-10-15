@@ -204,10 +204,7 @@ fn init_panel(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 fn hide_panel(app_handle: tauri::AppHandle) {
-    use tauri_nspanel::ManagerExt;
-    if let Ok(panel) = app_handle.get_webview_panel("main") {
-        panel.hide();
-    }
+    panel::hide_panel(&app_handle);
 }
 
 #[tauri::command]
@@ -504,17 +501,35 @@ fn list_plugins(state: tauri::State<'_, Mutex<AppState>>) -> Vec<PluginMeta> {
         .collect()
 }
 
+/// On Wayland, clients cannot position their own windows or keep them on top,
+/// so the tray popover would open in the middle of the screen. Run through
+/// XWayland unless the user picked a GDK backend themselves.
+#[cfg(target_os = "linux")]
+fn prefer_x11_backend() {
+    if std::env::var_os("GDK_BACKEND").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_some()
+    {
+        // SAFETY: called at the very start of `run`, before any other thread exists.
+        unsafe { std::env::set_var("GDK_BACKEND", "x11") };
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    prefer_x11_backend();
+
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let _guard = runtime.enter();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_aptabase::Builder::new("A-US-6435241436").build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_nspanel::init())
+        .plugin(tauri_plugin_store::Builder::default().build());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([

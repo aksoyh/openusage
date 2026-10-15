@@ -2,16 +2,23 @@ import { useEffect, useRef, useState } from "react"
 import { X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { GlobalShortcut } from "@/lib/settings"
+import { isMacPlatform } from "@/lib/platform"
+
+// Display names for the platform's primary and alt modifiers
+function modifierLabels(): { primary: string; alt: string } {
+  return isMacPlatform() ? { primary: "Cmd", alt: "Opt" } : { primary: "Ctrl", alt: "Alt" }
+}
 
 // Convert internal shortcut format to display format
-// e.g., "CommandOrControl+Shift+U" -> "Cmd + Shift + U"
+// e.g., "CommandOrControl+Shift+U" -> "Cmd + Shift + U" (macOS) / "Ctrl + Shift + U"
 function formatShortcutForDisplay(shortcut: string): string {
+  const labels = modifierLabels()
   return shortcut
-    .replace(/CommandOrControl/g, "Cmd")
+    .replace(/CommandOrControl/g, labels.primary)
     .replace(/Command/g, "Cmd")
     .replace(/Control/g, "Ctrl")
-    .replace(/Option/g, "Opt")
-    .replace(/Alt/g, "Opt")
+    .replace(/Option/g, labels.alt)
+    .replace(/Alt/g, labels.alt)
     .replace(/\+/g, " + ")
 }
 
@@ -97,6 +104,7 @@ function codeToTauriKey(code: string): string {
 
 // Build shortcut array from currently pressed keys (modifiers + main key)
 function buildShortcutFromCodes(codes: Set<string>): { display: string; tauri: string | null } {
+  const labels = modifierLabels()
   const modifiers: string[] = []
   const displayMods: string[] = []
   let mainCode: string | null = null
@@ -107,12 +115,12 @@ function buildShortcutFromCodes(codes: Set<string>): { display: string; tauri: s
       if (normalized === "Meta" || normalized === "Control") {
         if (!modifiers.includes("CommandOrControl")) {
           modifiers.push("CommandOrControl")
-          displayMods.push("Cmd")
+          displayMods.push(labels.primary)
         }
       } else if (normalized === "Alt") {
         if (!modifiers.includes("Alt")) {
           modifiers.push("Alt")
-          displayMods.push("Opt")
+          displayMods.push(labels.alt)
         }
       } else if (normalized === "Shift") {
         if (!modifiers.includes("Shift")) {

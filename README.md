@@ -10,6 +10,27 @@ See your usage at a glance from your menu bar. No digging through dashboards.
 
 The app auto-updates. Install once and you're set.
 
+### Linux & Windows
+
+The `cross-platform` branch builds for Linux and Windows on both x86_64 and ARM64:
+
+| Platform | x86_64 | ARM64 |
+|----------|--------|-------|
+| Linux    | `.deb`, `.rpm`, `.AppImage` | `.deb`, `.rpm`, `.AppImage` |
+| Windows  | `.msi`, NSIS `.exe` | NSIS `.exe` |
+
+Bundles come from the [Desktop Build](.github/workflows/desktop-build.yml) workflow (download them from the run's artifacts) or from a tagged release.
+
+Platform notes:
+
+- **Tray.** On Windows, click the tray icon to open the panel. Linux tray icons (AppIndicator) always open the menu: pick **Show Stats** there, or use the global shortcut. GNOME needs the AppIndicator extension for tray icons.
+- **Wayland.** The panel runs through XWayland so it can be placed next to the tray. Set `GDK_BACKEND=wayland` to opt out.
+- **Credentials.** The macOS Keychain is replaced by the Secret Service (GNOME Keyring, KWallet) on Linux and the Credential Manager on Windows. Providers that also store credentials in files (Claude, Codex, Copilot via `gh`, Cursor, ...) read those files as usual.
+- **Editor state.** Paths under `~/Library/Application Support/` map to `~/.config/` on Linux and `%APPDATA%` on Windows, so Cursor, Antigravity, Devin, Kiro and JetBrains are found in their usual places.
+- **macOS-only providers.** Perplexity reads the macOS app's cache and is not available elsewhere.
+
+Build locally with `bun install && bun tauri build`. Linux also needs `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libdbus-1-dev clang libclang-dev`.
+
 ## What It Does
 
 OpenUsage lives in your menu bar and shows you how much of your AI coding subscriptions you've used. Progress bars, badges, and clear labels. No mental math required.

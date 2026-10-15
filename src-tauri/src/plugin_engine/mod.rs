@@ -1,5 +1,7 @@
 pub mod host_api;
 pub mod manifest;
+#[cfg(not(target_os = "macos"))]
+mod platform;
 pub mod runtime;
 
 use manifest::LoadedPlugin;

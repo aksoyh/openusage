@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event"
 import { getCurrentWindow, PhysicalSize, currentMonitor } from "@tauri-apps/api/window"
 import type { ActiveView } from "@/components/side-nav"
 import type { DisplayPluginState } from "@/hooks/app/use-app-plugin-views"
+import { isMacPlatform } from "@/lib/platform"
 
 const PANEL_WIDTH = 400
 const MAX_HEIGHT_FALLBACK_PX = 600
@@ -121,7 +122,11 @@ export function usePanel({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return
-      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return
+      // Cmd+Up/Down on macOS, Ctrl+Up/Down on Linux and Windows
+      const mac = isMacPlatform()
+      const primary = mac ? event.metaKey : event.ctrlKey
+      const other = mac ? event.ctrlKey : event.metaKey
+      if (!primary || other || event.altKey || event.shiftKey) return
       if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return
       if (isEditableTarget(event.target)) return
 

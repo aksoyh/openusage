@@ -341,7 +341,24 @@ export function makeTrayBarsSvg(args: {
   return parts.join("")
 }
 
-async function rasterizeSvgToRgba(svg: string, widthPx: number, heightPx: number): Promise<Uint8Array> {
+/** RGB color applied to a rendered tray icon; see `getTrayIconTint`. */
+export type TrayTint = readonly [number, number, number]
+
+/** Recolor every pixel to `tint`, keeping alpha (what macOS does for template icons). */
+export function tintRgba(rgba: Uint8ClampedArray, tint: TrayTint): void {
+  for (let i = 0; i < rgba.length; i += 4) {
+    rgba[i] = tint[0]
+    rgba[i + 1] = tint[1]
+    rgba[i + 2] = tint[2]
+  }
+}
+
+async function rasterizeSvgToRgba(
+  svg: string,
+  widthPx: number,
+  heightPx: number,
+  tint?: TrayTint
+): Promise<Uint8Array> {
   const blob = new Blob([svg], { type: "image/svg+xml" })
   const url = URL.createObjectURL(blob)
   try {
@@ -368,6 +385,7 @@ async function rasterizeSvgToRgba(svg: string, widthPx: number, heightPx: number
     ctx.drawImage(img, 0, 0, widthPx, heightPx)
 
     const imageData = ctx.getImageData(0, 0, widthPx, heightPx)
+    if (tint) tintRgba(imageData.data, tint)
     return rgbaToImageDataBytes(imageData.data)
   } finally {
     URL.revokeObjectURL(url)
@@ -380,8 +398,9 @@ export async function renderTrayBarsIcon(args: {
   style?: MenubarIconStyle
   percentText?: string
   providerIconUrl?: string
+  tint?: TrayTint
 }): Promise<Image> {
-  const { bars, sizePx, style = "provider", percentText, providerIconUrl } = args
+  const { bars, sizePx, style = "provider", percentText, providerIconUrl, tint } = args
   const text = normalizePercentText(percentText)
   const svg = makeTrayBarsSvg({
     bars,
@@ -395,7 +414,7 @@ export async function renderTrayBarsIcon(args: {
     style,
     percentText: text,
   })
-  const rgba = await rasterizeSvgToRgba(svg, layout.width, layout.height)
+  const rgba = await rasterizeSvgToRgba(svg, layout.width, layout.height, tint)
   return await Image.new(rgba, layout.width, layout.height)
 }
 

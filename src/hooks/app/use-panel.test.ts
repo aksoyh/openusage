@@ -222,6 +222,36 @@ describe("usePanel", () => {
     secondHook.unmount()
   })
 
+  it("switches views with Ctrl+Arrow on Linux and Windows", () => {
+    Object.defineProperty(window.navigator, "platform", { configurable: true, get: () => "Linux x86_64" })
+    try {
+      const setActiveView = vi.fn()
+      renderHook(() =>
+        usePanel({
+          activeView: "home",
+          setActiveView,
+          showAbout: false,
+          setShowAbout: vi.fn(),
+          displayPlugins: [
+            { meta: { id: "a" }, data: null, loading: false, error: null, lastManualRefreshAt: null } as any,
+          ],
+        })
+      )
+
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", metaKey: true }))
+      })
+      expect(setActiveView).not.toHaveBeenCalled()
+
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", ctrlKey: true }))
+      })
+      expect(setActiveView).toHaveBeenCalledWith("a")
+    } finally {
+      Object.defineProperty(window.navigator, "platform", { configurable: true, get: () => "MacIntel" })
+    }
+  })
+
   it("ignores Cmd+Arrow navigation from editable targets", () => {
     const setActiveView = vi.fn()
     const { result } = renderHook(() =>

@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/image", () => ({
   },
 }))
 
-import { getTrayIconSizePx, makeTrayBarsSvg, renderTrayBarsIcon } from "@/lib/tray-bars-icon"
+import { getTrayIconSizePx, makeTrayBarsSvg, renderTrayBarsIcon, tintRgba } from "@/lib/tray-bars-icon"
 
 describe("tray-bars-icon", () => {
   it("getTrayIconSizePx renders 18px at 1x and 36px at 2x", () => {
@@ -181,5 +181,11 @@ describe("tray-bars-icon", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(document as any).createElement = originalCreateElement
     }
+  })
+
+  it("tintRgba recolors pixels and keeps alpha", () => {
+    const rgba = new Uint8ClampedArray([0, 0, 0, 255, 10, 20, 30, 0, 0, 0, 0, 128])
+    tintRgba(rgba, [255, 255, 255])
+    expect(Array.from(rgba)).toEqual([255, 255, 255, 255, 255, 255, 255, 0, 255, 255, 255, 128])
   })
 })

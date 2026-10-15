@@ -29,6 +29,23 @@ describe("GlobalShortcutSection", () => {
     expect(screen.getByText("Cmd + Opt + Delete")).toBeInTheDocument()
   })
 
+  it("uses Ctrl and Alt labels on Linux and Windows", async () => {
+    Object.defineProperty(window.navigator, "platform", { configurable: true, get: () => "Win32" })
+    try {
+      renderSection("CommandOrControl+Alt+Delete")
+      expect(screen.getByText("Ctrl + Alt + Delete")).toBeInTheDocument()
+
+      await userEvent.click(screen.getByRole("button", { name: /Ctrl \+ Alt \+ Delete/i }))
+      const textbox = screen.getByRole("textbox", { name: /Press keys to record shortcut/i })
+      fireEvent.keyDown(textbox, { key: "Control", code: "ControlLeft" })
+      fireEvent.keyDown(textbox, { key: "Alt", code: "AltLeft" })
+      fireEvent.keyDown(textbox, { key: "U", code: "KeyU" })
+      expect(screen.getByText("Ctrl + Alt + U")).toBeInTheDocument()
+    } finally {
+      Object.defineProperty(window.navigator, "platform", { configurable: true, get: () => "MacIntel" })
+    }
+  })
+
   it("records and saves CommandOrControl + Shift + key", async () => {
     const { onGlobalShortcutChange } = renderSection()
     const textbox = await startRecording()

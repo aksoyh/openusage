@@ -19,7 +19,19 @@ jobs:
             args: "--target aarch64-apple-darwin"
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
+          - platform: ubuntu-22.04
+            args: "--target x86_64-unknown-linux-gnu"
+          - platform: ubuntu-22.04-arm
+            args: "--target aarch64-unknown-linux-gnu"
+          - platform: windows-latest
+            args: "--target x86_64-pc-windows-msvc"
+          # Cross-compiled on x64; WiX (MSI) cannot target ARM64, NSIS can.
+          - platform: windows-latest
+            args: "--target aarch64-pc-windows-msvc --bundles nsis"
     runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
@@ -27,9 +39,17 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
 
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev libdbus-1-dev clang libclang-dev patchelf rpm file
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || runner.os == 'Windows' && 'x86_64-pc-windows-msvc,aarch64-pc-windows-msvc' || '' }}
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
@@ -81,6 +101,7 @@ jobs:
           fi
 
       - name: Import Apple Developer Certificate
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

@@ -5,6 +5,7 @@ import type { PluginMeta } from "@/lib/plugin-types"
 import type { DisplayMode, MenubarIconStyle, MenubarMetric, PluginSettings } from "@/lib/settings"
 import { getEnabledPluginIds } from "@/lib/settings"
 import { getTrayIconSizePx, renderTrayBarsIcon } from "@/lib/tray-bars-icon"
+import { getTrayIconTint, getTrayStaticIconResource, isMacPlatform } from "@/lib/platform"
 import { getTrayPrimaryBars, type TrayPrimaryBar } from "@/lib/tray-primary-progress"
 import { formatTrayPercentText, formatTrayTooltip } from "@/lib/tray-tooltip"
 import type { PluginState } from "@/hooks/app/types"
@@ -136,7 +137,11 @@ export function useTrayIcon({
         return
       }
 
-      const maybeSetTitle = (tray as TrayIcon & { setTitle?: (value: string) => Promise<void> }).setTitle
+      // Only the macOS menu bar shows tray titles reliably (Windows ignores them,
+      // many Linux panels too); elsewhere the percentage is drawn into the icon.
+      const maybeSetTitle = isMacPlatform()
+        ? (tray as TrayIcon & { setTitle?: (value: string) => Promise<void> }).setTitle
+        : undefined
       const setTitleFn =
         typeof maybeSetTitle === "function" ? (value: string) => maybeSetTitle.call(tray, value) : null
       const supportsNativeTrayTitle = setTitleFn !== null
@@ -194,6 +199,7 @@ export function useTrayIcon({
       const style = menubarIconStyleRef.current
       const preferWeekly = menubarMetricRef.current === "weekly"
       const sizePx = getTrayIconSizePx(window.devicePixelRatio)
+      const tint = getTrayIconTint()
       const nextActiveView = activeViewRef.current
       const activeProviderId =
         nextActiveView !== "home" && nextActiveView !== "settings" ? nextActiveView : null
@@ -262,6 +268,7 @@ export function useTrayIcon({
           bars: barsForPreview,
           sizePx,
           style: "bars",
+          tint,
         })
           .then(async (img) => {
             await tray.setIcon(img)
@@ -290,6 +297,7 @@ export function useTrayIcon({
           sizePx,
           style: "donut",
           providerIconUrl,
+          tint,
         })
           .then(async (img) => {
             await tray.setIcon(img)
@@ -312,6 +320,7 @@ export function useTrayIcon({
         style: "provider",
         percentText: supportsNativeTrayTitle ? undefined : providerPercentText,
         providerIconUrl,
+        tint,
       })
         .then(async (img) => {
           await tray.setIcon(img)
@@ -341,7 +350,7 @@ export function useTrayIcon({
         trayInitializedRef.current = true
 
         try {
-          trayGaugeIconPathRef.current = await resolveResource("icons/tray-icon.png")
+          trayGaugeIconPathRef.current = await resolveResource(getTrayStaticIconResource())
         } catch (e) {
           console.error("Failed to resolve tray gauge icon resource:", e)
         }

@@ -7,6 +7,12 @@ vi.mock("@aptabase/tauri", () => ({
   trackEvent: vi.fn(),
 }))
 
+// Tests describe macOS behavior (Cmd/Option labels) unless they override this.
+Object.defineProperty(window.navigator, "platform", {
+  configurable: true,
+  get: () => "MacIntel",
+})
+
 afterEach(() => {
   cleanup()
 })

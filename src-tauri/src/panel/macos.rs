@@ -3,19 +3,7 @@ use tauri_nspanel::{
     CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt, tauri_panel,
 };
 
-fn monitor_contains_physical_point(
-    origin_x: f64,
-    origin_y: f64,
-    width: f64,
-    height: f64,
-    point_x: f64,
-    point_y: f64,
-) -> bool {
-    point_x >= origin_x
-        && point_x < origin_x + width
-        && point_y >= origin_y
-        && point_y < origin_y + height
-}
+use super::monitor_contains_physical_point;
 
 unsafe fn set_panel_frame_top_left(panel: &tauri_nspanel::NSPanel, x: f64, y: f64) {
     let point = tauri_nspanel::NSPoint::new(x, y);
@@ -85,9 +73,6 @@ macro_rules! get_or_init_panel {
     };
 }
 
-// Export macro for use in other modules
-pub(crate) use get_or_init_panel;
-
 /// Retrieve the tray icon rect and position the panel beneath it.
 /// No-ops gracefully if the tray icon or its rect is unavailable.
 fn position_panel_from_tray(app_handle: &AppHandle) {
@@ -131,6 +116,31 @@ pub fn toggle_panel(app_handle: &AppHandle) {
         panel.show_and_make_key();
         position_panel_from_tray(app_handle);
     }
+}
+
+/// Hide the panel if it exists.
+pub fn hide_panel(app_handle: &AppHandle) {
+    if let Ok(panel) = app_handle.get_webview_panel("main") {
+        panel.hide();
+    }
+}
+
+/// Toggle the panel in response to a tray icon click at the given icon rect.
+pub fn toggle_panel_at_tray(app_handle: &AppHandle, icon_position: Position, icon_size: Size) {
+    let Some(panel) = get_or_init_panel!(app_handle) else {
+        return;
+    };
+
+    if panel.is_visible() {
+        log::debug!("tray click: hiding panel");
+        panel.hide();
+        return;
+    }
+    log::debug!("tray click: showing panel");
+
+    // macOS quirk: must show window before positioning to another monitor
+    panel.show_and_make_key();
+    position_panel_at_tray_icon(app_handle, icon_position, icon_size);
 }
 
 // Define our panel class and event handler together
@@ -188,7 +198,7 @@ pub fn init(app_handle: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub fn position_panel_at_tray_icon(
+fn position_panel_at_tray_icon(
     app_handle: &tauri::AppHandle,
     icon_position: Position,
     icon_size: Size,

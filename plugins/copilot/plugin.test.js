@@ -90,6 +90,30 @@ describe("copilot plugin", () => {
     expect(call.headers.Authorization).toBe("token gho_plain_token");
   });
 
+  it("loads token from the gh CLI hosts file when no keyring is available", async () => {
+    const ctx = makePluginTestContext();
+    ctx.host.fs.writeText(
+      "~/AppData/Roaming/GitHub CLI/hosts.yml",
+      [
+        "enterprise.example.com:",
+        "    oauth_token: ghe_other_host",
+        "github.com:",
+        "    users:",
+        "        octocat:",
+        "            oauth_token: gho_hosts_file",
+        "    git_protocol: https",
+        "    user: octocat",
+        "",
+      ].join("\r\n"),
+    );
+    mockUsageOk(ctx);
+    const plugin = await loadPlugin();
+    const result = plugin.probe(ctx);
+    expect(result.lines.find((l) => l.label === "Premium")).toBeTruthy();
+    const call = ctx.host.http.request.mock.calls[0][0];
+    expect(call.headers.Authorization).toBe("token gho_hosts_file");
+  });
+
   it("loads token from gh CLI keychain (base64-encoded)", async () => {
     const ctx = makePluginTestContext();
     const encoded = ctx.base64.encode("gho_encoded_token");

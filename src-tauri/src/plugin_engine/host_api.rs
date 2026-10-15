@@ -126,8 +126,22 @@ fn read_env_from_process(name: &str) -> Option<String> {
     sanitize_env_value(&value)
 }
 
+/// `Command::new` that does not flash a console window when the GUI app
+/// spawns a console program on Windows.
+pub(crate) fn host_command(program: impl AsRef<OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn read_command_stdout(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    let output = host_command(program).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -238,6 +252,11 @@ fn read_env_from_interactive_shell(program: &str, name: &str) -> Option<String> 
 }
 
 fn read_env_from_interactive_shells(name: &str) -> Option<String> {
+    // Windows GUI apps inherit the user's environment; there is no login shell to ask.
+    if cfg!(windows) {
+        return None;
+    }
+
     let mut programs: Vec<String> = Vec::new();
 
     if let Some(shell) = shell_from_env() {
@@ -1335,23 +1354,13 @@ fn inject_ls<'js>(ctx: &Ctx<'js>, host: &Object<'js>, plugin_id: &str) -> rquick
                     opts.markers
                 );
 
-                let ps_output = match std::process::Command::new("/bin/ps")
-                    .args(["-ax", "-o", "pid=,command="])
-                    .output()
-                {
-                    Ok(o) => o,
+                let processes = match list_processes() {
+                    Ok(processes) => processes,
                     Err(e) => {
-                        log::warn!("[plugin:{}] ps failed: {}", pid, e);
+                        log::warn!("[plugin:{}] {}", pid, e);
                         return Ok("null".to_string());
                     }
                 };
-
-                if !ps_output.status.success() {
-                    log::warn!("[plugin:{}] ps returned non-zero", pid);
-                    return Ok("null".to_string());
-                }
-
-                let ps_stdout = String::from_utf8_lossy(&ps_output.stdout);
                 let process_name_lower = opts.process_name.to_lowercase();
                 let markers_lower: Vec<String> = opts
                     .markers
@@ -1367,44 +1376,22 @@ fn inject_ls<'js>(ctx: &Ctx<'js>, host: &Object<'js>, plugin_id: &str) -> rquick
                 //   2. Path substring (/<marker>/) as fallback when no flags found
                 let mut candidates: Vec<(u8, i32, String)> = Vec::new();
 
-                for line in ps_stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
+                for (process_pid, command) in processes {
+                    if !ls_command_matches_process(&command, &process_name_lower) {
                         continue;
                     }
 
-                    let mut parts = trimmed.splitn(2, char::is_whitespace);
-                    let pid_str = match parts.next() {
-                        Some(s) => s.trim(),
-                        None => continue,
-                    };
-                    let command = match parts.next() {
-                        Some(s) => s.trim(),
-                        None => continue,
-                    };
-
-                    if !ls_command_matches_process(command, &process_name_lower) {
-                        continue;
-                    }
-
-                    let Some(marker_rank) = ls_marker_rank(command, &markers_lower) else {
+                    let Some(marker_rank) = ls_marker_rank(&command, &markers_lower) else {
                         continue;
                     };
 
-                    if let Ok(p) = pid_str.parse::<i32>() {
-                        candidates.push((marker_rank, p, command.to_string()));
-                    }
+                    candidates.push((marker_rank, process_pid, command));
                 }
 
                 if candidates.is_empty() {
                     log::info!("[plugin:{}] LS process not found", pid);
                     return Ok("null".to_string());
                 }
-
-                let lsof_path = ["/usr/sbin/lsof", "/usr/bin/lsof"]
-                    .iter()
-                    .find(|p| std::path::Path::new(p).exists())
-                    .copied();
 
                 candidates.sort_by_key(|(marker_rank, _, _)| *marker_rank);
                 for (_, process_pid, command) in candidates {
@@ -1434,34 +1421,10 @@ fn inject_ls<'js>(ctx: &Ctx<'js>, host: &Object<'js>, plugin_id: &str) -> rquick
                         }
                     }
 
-                    let ports = if let Some(lsof) = lsof_path {
-                        match std::process::Command::new(lsof)
-                            .args([
-                                "-nP",
-                                "-iTCP",
-                                "-sTCP:LISTEN",
-                                "-a",
-                                "-p",
-                                &process_pid.to_string(),
-                            ])
-                            .output()
-                        {
-                            Ok(o) if o.status.success() => {
-                                ls_parse_listening_ports(&String::from_utf8_lossy(&o.stdout))
-                            }
-                            Ok(_) => {
-                                log::warn!("[plugin:{}] lsof returned non-zero", pid);
-                                Vec::new()
-                            }
-                            Err(e) => {
-                                log::warn!("[plugin:{}] lsof failed: {}", pid, e);
-                                Vec::new()
-                            }
-                        }
-                    } else {
-                        log::warn!("[plugin:{}] lsof not found", pid);
+                    let ports = listening_ports(process_pid).unwrap_or_else(|e| {
+                        log::warn!("[plugin:{}] {}", pid, e);
                         Vec::new()
-                    };
+                    });
 
                     if ports.is_empty() && extension_port.is_none() {
                         log::warn!(
@@ -1519,6 +1482,68 @@ pub fn patch_ls_wrapper(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     )
 }
 
+/// `(pid, command line)` of every running process.
+fn list_processes() -> Result<Vec<(i32, String)>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = host_command("/bin/ps")
+            .args(["-ax", "-o", "pid=,command="])
+            .output()
+            .map_err(|e| format!("ps failed: {}", e))?;
+        if !output.status.success() {
+            return Err("ps returned non-zero".to_string());
+        }
+        Ok(ls_parse_ps_output(&String::from_utf8_lossy(&output.stdout)))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(super::platform::list_processes())
+    }
+}
+
+/// Parse `ps -ax -o pid=,command=` output.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn ls_parse_ps_output(output: &str) -> Vec<(i32, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().splitn(2, char::is_whitespace);
+            let pid = parts.next()?.trim().parse::<i32>().ok()?;
+            let command = parts.next()?.trim();
+            (!command.is_empty()).then(|| (pid, command.to_string()))
+        })
+        .collect()
+}
+
+/// TCP ports `pid` is listening on.
+fn listening_ports(pid: i32) -> Result<Vec<i32>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let lsof = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .copied()
+            .ok_or_else(|| "lsof not found".to_string())?;
+        let output = host_command(lsof)
+            .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid.to_string()])
+            .output()
+            .map_err(|e| format!("lsof failed: {}", e))?;
+        if !output.status.success() {
+            return Err("lsof returned non-zero".to_string());
+        }
+        Ok(ls_parse_listening_ports(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        super::platform::listening_ports(pid)
+            .ok_or_else(|| format!("could not read listening ports for pid {}", pid))
+    }
+}
+
 /// Extract value of a CLI flag from a command string.
 /// Handles both `--flag value` and `--flag=value` forms.
 fn ls_extract_flag(command: &str, flag: &str) -> Option<String> {
@@ -1553,7 +1578,7 @@ fn ls_marker_rank(command: &str, markers_lower: &[String]) -> Option<u8> {
             .then_some(0);
     }
 
-    let command_lower = command.to_lowercase();
+    let command_lower = command.to_lowercase().replace('\\', "/");
     markers_lower
         .iter()
         .any(|m| command_lower.contains(&format!("/{}/", m)))
@@ -1579,12 +1604,18 @@ fn ls_command_matches_process(command: &str, process_name_lower: &str) -> bool {
         return false;
     }
 
+    let command = command.replace('\\', "/");
+    let command = command.as_str();
     let argv0 = ls_argv0(command);
     let exe_name = Path::new(argv0)
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| name.to_lowercase())
         .unwrap_or_default();
+    let exe_name = exe_name
+        .strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(exe_name);
 
     if exe_name == process_name_lower {
         return true;
@@ -1602,6 +1633,7 @@ fn ls_command_matches_process(command: &str, process_name_lower: &str) -> bool {
 }
 
 /// Parse listening port numbers from `lsof -nP -iTCP -sTCP:LISTEN` output.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn ls_parse_listening_ports(output: &str) -> Vec<i32> {
     let mut ports = std::collections::BTreeSet::new();
     for line in output.lines() {
@@ -1785,6 +1817,35 @@ fn ccusage_home_override<'a>(
     }
 }
 
+#[cfg(windows)]
+fn ccusage_runner_candidates(kind: CcusageRunnerKind) -> Vec<String> {
+    // npm-style launchers are `.cmd` shims on Windows; `Command` only resolves
+    // them on PATH when the extension is spelled out.
+    let mut candidates: Vec<String> = Vec::new();
+    match kind {
+        CcusageRunnerKind::Bunx => {
+            if let Some(home) = dirs::home_dir() {
+                candidates.push(home.join(".bun\\bin\\bunx.exe").to_string_lossy().to_string());
+            }
+            candidates.extend(["bunx.exe", "bunx.cmd"].into_iter().map(str::to_string));
+        }
+        CcusageRunnerKind::PnpmDlx => {
+            candidates.extend(["pnpm.exe", "pnpm.cmd"].into_iter().map(str::to_string));
+        }
+        CcusageRunnerKind::YarnDlx => {
+            candidates.extend(["yarn.cmd"].into_iter().map(str::to_string));
+        }
+        CcusageRunnerKind::NpmExec => {
+            candidates.extend(["npm.cmd"].into_iter().map(str::to_string));
+        }
+        CcusageRunnerKind::Npx => {
+            candidates.extend(["npx.cmd"].into_iter().map(str::to_string));
+        }
+    }
+    candidates
+}
+
+#[cfg(not(windows))]
 fn ccusage_runner_candidates(kind: CcusageRunnerKind) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     match kind {
@@ -1865,11 +1926,25 @@ fn ccusage_path_entries_with(home: Option<&Path>, existing_path: Option<&OsStr>)
         entries.push(home.join(".local/bin"));
     }
 
+    #[cfg(not(windows))]
     entries.extend(
         ["/opt/homebrew/bin", "/usr/local/bin"]
             .into_iter()
             .map(PathBuf::from),
     );
+
+    #[cfg(windows)]
+    {
+        if let Some(app_data) = dirs::data_dir() {
+            entries.push(app_data.join("npm"));
+        }
+        if let Some(local_app_data) = dirs::data_local_dir() {
+            entries.push(local_app_data.join("pnpm"));
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            entries.push(PathBuf::from(program_files).join("nodejs"));
+        }
+    }
 
     if let Some(existing_path) = existing_path {
         for path in std::env::split_paths(existing_path) {
@@ -1905,7 +1980,7 @@ fn ccusage_enriched_path() -> Option<OsString> {
 }
 
 fn ccusage_runner_available(candidate: &str, enriched_path: Option<&OsStr>) -> bool {
-    let mut command = std::process::Command::new(candidate);
+    let mut command = host_command(candidate);
     command.arg("--version");
     if let Some(path) = enriched_path {
         command.env("PATH", path);
@@ -2114,7 +2189,21 @@ fn kill_ccusage_on_timeout(child: &mut std::process::Child) -> std::io::Result<(
         kill_ccusage_process_group(child.id())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // `.cmd` shims run node as a grandchild; kill the whole tree.
+        let status = host_command("taskkill")
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            _ => child.kill(),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         child.kill()
     }
@@ -2210,7 +2299,7 @@ fn run_ccusage_with_runner_timeout(
 ) -> CcusageRunnerResult {
     let args = ccusage_runner_args(kind, opts, provider, flavor);
     let enriched_path = ccusage_enriched_path();
-    let mut command = std::process::Command::new(program);
+    let mut command = host_command(program);
     configure_ccusage_command(&mut command, &args, enriched_path.as_deref());
 
     if let Some(home_path) = ccusage_home_override(opts, provider) {
@@ -2455,6 +2544,81 @@ pub fn patch_ccusage_wrapper(ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     )
 }
 
+/// Keychain read on Linux/Windows (Secret Service / Credential Manager).
+#[cfg(not(target_os = "macos"))]
+fn portable_keychain_read(
+    ctx: &Ctx<'_>,
+    plugin_id: &str,
+    service: &str,
+    account: Option<&str>,
+) -> rquickjs::Result<String> {
+    log::info!("[plugin:{}] keychain read: service={}", plugin_id, service);
+    match super::platform::read_password(service, account) {
+        Ok(value) => {
+            log::info!("[plugin:{}] keychain read hit: service={}", plugin_id, service);
+            Ok(value)
+        }
+        Err(error) => {
+            log::warn!(
+                "[plugin:{}] keychain read miss: service={}, error={}",
+                plugin_id,
+                service,
+                error
+            );
+            Err(Exception::throw_message(
+                ctx,
+                &format!("keychain item not found: {}", error),
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn portable_keychain_read(
+    _ctx: &Ctx<'_>,
+    _plugin_id: &str,
+    _service: &str,
+    _account: Option<&str>,
+) -> rquickjs::Result<String> {
+    unreachable!("macOS reads the keychain through the security CLI")
+}
+
+/// Keychain write on Linux/Windows, stored under the current user's account.
+#[cfg(not(target_os = "macos"))]
+fn portable_keychain_write(
+    ctx: &Ctx<'_>,
+    plugin_id: &str,
+    service: &str,
+    value: &str,
+) -> rquickjs::Result<()> {
+    log::info!("[plugin:{}] keychain write: service={}", plugin_id, service);
+    super::platform::write_password(service, None, value).map_err(|error| {
+        log::warn!(
+            "[plugin:{}] keychain write failed: service={}, error={}",
+            plugin_id,
+            service,
+            error
+        );
+        Exception::throw_message(ctx, &format!("keychain write failed: {}", error))
+    })?;
+    log::info!(
+        "[plugin:{}] keychain write succeeded: service={}",
+        plugin_id,
+        service
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn portable_keychain_write(
+    _ctx: &Ctx<'_>,
+    _plugin_id: &str,
+    _service: &str,
+    _value: &str,
+) -> rquickjs::Result<()> {
+    unreachable!("macOS writes the keychain through the security CLI")
+}
+
 fn inject_keychain<'js>(
     ctx: &Ctx<'js>,
     host: &Object<'js>,
@@ -2471,12 +2635,6 @@ fn inject_keychain<'js>(
                   service: String,
                   account_args: Rest<Option<String>>|
                   -> rquickjs::Result<String> {
-                if !cfg!(target_os = "macos") {
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        "keychain API is only supported on macOS",
-                    ));
-                }
                 let account = account_args
                     .0
                     .into_iter()
@@ -2490,6 +2648,9 @@ fn inject_keychain<'js>(
                             Some(trimmed.to_string())
                         }
                     });
+                if !cfg!(target_os = "macos") {
+                    return portable_keychain_read(&ctx_inner, &pid_read, &service, account.as_deref());
+                }
                 let redacted_account = account.as_ref().map(|value| redact_value(value));
                 if let Some(ref redacted) = redacted_account {
                     log::info!(
@@ -2567,10 +2728,7 @@ fn inject_keychain<'js>(
             ctx.clone(),
             move |ctx_inner: Ctx<'_>, service: String| -> rquickjs::Result<String> {
                 if !cfg!(target_os = "macos") {
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        "keychain API is only supported on macOS",
-                    ));
+                    return portable_keychain_read(&ctx_inner, &pid_read_current_user, &service, None);
                 }
                 let account = current_macos_keychain_account();
                 let args = keychain_find_generic_password_args_for_account(&service, &account);
@@ -2625,10 +2783,7 @@ fn inject_keychain<'js>(
             ctx.clone(),
             move |ctx_inner: Ctx<'_>, service: String, value: String| -> rquickjs::Result<()> {
                 if !cfg!(target_os = "macos") {
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        "keychain API is only supported on macOS",
-                    ));
+                    return portable_keychain_write(&ctx_inner, &pid_write, &service, &value);
                 }
                 log::info!("[plugin:{}] keychain write: service={}", pid_write, service);
 
@@ -2699,10 +2854,7 @@ fn inject_keychain<'js>(
             ctx.clone(),
             move |ctx_inner: Ctx<'_>, service: String, value: String| -> rquickjs::Result<()> {
                 if !cfg!(target_os = "macos") {
-                    return Err(Exception::throw_message(
-                        &ctx_inner,
-                        "keychain API is only supported on macOS",
-                    ));
+                    return portable_keychain_write(&ctx_inner, &pid_write_current_user, &service, &value);
                 }
                 let account = current_macos_keychain_account();
                 let args =
@@ -2755,6 +2907,27 @@ fn inject_keychain<'js>(
     Ok(())
 }
 
+/// SQLite access on Linux/Windows, where the `sqlite3` CLI is usually missing.
+#[cfg(not(target_os = "macos"))]
+fn portable_sqlite_query(path: &str, sql: &str) -> Result<String, String> {
+    super::platform::sqlite_query(path, sql)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn portable_sqlite_exec(path: &str, sql: &str) -> Result<(), String> {
+    super::platform::sqlite_exec(path, sql)
+}
+
+#[cfg(target_os = "macos")]
+fn portable_sqlite_query(_path: &str, _sql: &str) -> Result<String, String> {
+    unreachable!("macOS uses the sqlite3 CLI")
+}
+
+#[cfg(target_os = "macos")]
+fn portable_sqlite_exec(_path: &str, _sql: &str) -> Result<(), String> {
+    unreachable!("macOS uses the sqlite3 CLI")
+}
+
 fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()> {
     let sqlite_obj = Object::new(ctx.clone())?;
 
@@ -2770,6 +2943,10 @@ fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()
                     ));
                 }
                 let expanded = expand_path(&db_path);
+                if !cfg!(target_os = "macos") {
+                    return portable_sqlite_query(&expanded, &sql)
+                        .map_err(|error| Exception::throw_message(&ctx_inner, &error));
+                }
 
                 // Prefer a normal read-only open so WAL contents are visible (common for app state DBs).
                 // Fall back to immutable=1 to bypass WAL/SHM lock issues after macOS sleep.
@@ -2828,6 +3005,10 @@ fn inject_sqlite<'js>(ctx: &Ctx<'js>, host: &Object<'js>) -> rquickjs::Result<()
                     ));
                 }
                 let expanded = expand_path(&db_path);
+                if !cfg!(target_os = "macos") {
+                    return portable_sqlite_exec(&expanded, &sql)
+                        .map_err(|error| Exception::throw_message(&ctx_inner, &error));
+                }
                 let output = std::process::Command::new("sqlite3")
                     .args([&expanded, &sql])
                     .output()
@@ -2861,7 +3042,20 @@ fn iso_now() -> String {
         })
 }
 
+/// Prefix plugins use for per-app state (VS Code-style editors, JetBrains, ...).
+const MACOS_APP_SUPPORT_PREFIX: &str = "~/Library/Application Support/";
+
 fn expand_path(path: &str) -> String {
+    // Electron/VS Code-based apps keep the same layout under the platform config
+    // dir: ~/.config (or $XDG_CONFIG_HOME) on Linux, %APPDATA% on Windows.
+    if !cfg!(target_os = "macos") {
+        if let Some(rest) = path.strip_prefix(MACOS_APP_SUPPORT_PREFIX) {
+            if let Some(config_dir) = dirs::config_dir() {
+                return config_dir.join(rest).to_string_lossy().to_string();
+            }
+        }
+    }
+
     if path == "~" {
         if let Some(home) = dirs::home_dir() {
             return home.to_string_lossy().to_string();
@@ -3192,6 +3386,25 @@ mod tests {
     }
 
     #[test]
+    fn ls_command_matches_windows_command_lines() {
+        assert!(ls_command_matches_process(
+            r#""C:\Users\me\AppData\Local\Programs\Antigravity\agy.exe" --some-flag"#,
+            "agy"
+        ));
+        assert!(ls_command_matches_process(
+            r"C:\Users\me\AppData\Local\Programs\Antigravity\resources\bin\language_server_windows_x64.exe --csrf_token x",
+            "language_server"
+        ));
+        assert_eq!(
+            ls_marker_rank(
+                r"C:\Users\me\AppData\Local\Programs\Antigravity\resources\bin\language_server_windows_x64.exe",
+                &["antigravity".to_string()]
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn ls_marker_rank_prefers_exact_flags_over_path_fallback() {
         let markers = vec!["antigravity".to_string()];
 
@@ -3346,6 +3559,21 @@ mod tests {
         let expected = home.join(".claude-custom").to_string_lossy().to_string();
 
         assert_eq!(expand_path("~/.claude-custom"), expected);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn expand_path_maps_macos_app_support_to_the_platform_config_dir() {
+        let config_dir = dirs::config_dir().expect("config dir");
+        let expected = config_dir
+            .join("Cursor/User/globalStorage/state.vscdb")
+            .to_string_lossy()
+            .to_string();
+
+        assert_eq!(
+            expand_path("~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+            expected
+        );
     }
 
     #[test]
@@ -4076,6 +4304,8 @@ mod tests {
         );
     }
 
+    // Asserts the Unix default entries (/opt/homebrew/bin, /usr/local/bin).
+    #[cfg(not(windows))]
     #[test]
     fn ccusage_path_entries_with_home_and_existing_path_preserves_order() {
         let home = std::path::PathBuf::from("/tmp/openusage-home");
@@ -4100,6 +4330,8 @@ mod tests {
         );
     }
 
+    // Asserts the Unix default entries (/opt/homebrew/bin, /usr/local/bin).
+    #[cfg(not(windows))]
     #[test]
     fn ccusage_path_entries_with_deduplicates_prefix_and_existing_entries() {
         let existing = std::env::join_paths([
@@ -4121,6 +4353,8 @@ mod tests {
         );
     }
 
+    // Asserts the Unix default entries (/opt/homebrew/bin, /usr/local/bin).
+    #[cfg(not(windows))]
     #[test]
     fn ccusage_enriched_path_with_uses_defaults_without_home_or_existing_path() {
         let enriched = ccusage_enriched_path_with(None, None).expect("enriched path");
@@ -4135,6 +4369,8 @@ mod tests {
         );
     }
 
+    // Asserts the Unix default entries (/opt/homebrew/bin, /usr/local/bin).
+    #[cfg(not(windows))]
     #[test]
     fn ccusage_enriched_path_with_preserves_entries_after_join_and_split() {
         let home = std::path::PathBuf::from("/tmp/openusage-home");
@@ -4453,6 +4689,8 @@ esac
         let mut permissions = script.metadata().expect("script metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script_path, permissions).expect("make script executable");
+        // Close the write handle first: Linux refuses to exec a file open for writing (ETXTBSY).
+        drop(script);
 
         let opts = CcusageQueryOpts {
             provider: Some("codex".to_string()),
@@ -4571,6 +4809,8 @@ wait
         let mut permissions = script.metadata().expect("script metadata").permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script_path, permissions).expect("make script executable");
+        // Close the write handle first: Linux refuses to exec a file open for writing (ETXTBSY).
+        drop(script);
 
         let opts = CcusageQueryOpts::default();
         let start = Instant::now();
