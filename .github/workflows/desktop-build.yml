@@ -59,7 +59,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            libxdo-dev libssl-dev libdbus-1-dev clang libclang-dev patchelf rpm file
+            libxdo-dev libssl-dev libdbus-1-dev clang libclang-dev patchelf rpm file xdg-utils
 
       - uses: dtolnay/rust-toolchain@stable
         with:
